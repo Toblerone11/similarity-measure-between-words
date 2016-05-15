@@ -1,6 +1,6 @@
 import json
 import sys, numpy, re, os, math
-
+import scipy.stats as st
 import re
 import scipy.sparse as ss
 from scipy.io import mmwrite, mmread
@@ -16,13 +16,25 @@ FREQ_MATRIX_2 = r".\freq_matrix_2.mtx"
 FREQ_MATRIX_5 = r".\freq_matrix_5.mtx"
 PPMI_MATRIX_2 = r".\ppmi_matrix_2.mtx"
 PPMI_MATRIX_5 = r".\ppmi_matrix_5.mtx"
+CORRELATION_PATH = "correlation.txt"
 GOLD_STANDARD_SIMLEX = r".\simlex_gold_standard.txt"
 COMP_FREQ_5 = "comp_freq_5.txt"
-COMP_FREQ_2 = "comp_freq_5.txt"
-COMP_PPMI_5 = "comp_freq_5.txt"
-COMP_PPMI_2 = "comp_freq_5.txt"
+COMP_FREQ_2 = "comp_freq_2.txt"
+COMP_PPMI_5 = "comp_ppmi_5.txt"
+COMP_PPMI_2 = "comp_ppmi_2.txt"
+ADJ = "A"
+NOUN = "N"
+VERB = "V"
 
-USAGE_MESSAGE = "Usage:"
+USAGE_MESSAGE = "Usage: <integer>\n\nThe process is divided into 5 parts:\nPreprocessing --> Frequency Matrices Building --> PPMI Calculation --> Similarity Calculation --> Correlation Check\n" \
+                "The process is pretty long and each option is using as checkpoint for some stage.\n" \
+                "After each stage all relevant data is saved into files and the procedure may continue from the last stage that has been invoked.\n" \
+                "options:\n" \
+                "\t'0' or lower - start point: Preprocessing\n" \
+                "\t'1' - start point: Frequency Matrices Building\n" \
+                "\t'2' - start point: PPMI Calculation\n" \
+                "\t'3' - start point: Similarity Calculation\n" \
+                "\t'4 or greater' - start point: Correlation Check\n"
 
 DIGIT_REPR = "<!DIGIT!>"
 BEGIN_S = re.compile("\s*<s>\s*")
@@ -65,7 +77,7 @@ def preprocess(path_to_corpus, relevance_treshold=None):
     words_count = Counter()
     with open(path_to_corpus) as raw_c:
         dir = os.path.abspath(
-                os.path.join(path_to_corpus, os.pardir))  # TODO check that this is the parent directory of the file.
+            os.path.join(path_to_corpus, os.pardir))  # TODO check that this is the parent directory of the file.
         print(dir)
         lineNum = 0
         printLine = 0
@@ -212,7 +224,7 @@ def calculate_ppmi(row_dic, col_dic, M):
                 col_probs[c] = M[:, c].sum()
 
             prob_context_word = col_probs[c]
-            M[(w, c)] = max(0, math.log2(M[(w, c)] / (prob_sim_word * prob_context_word)))
+            M[(w, c)] = max(0, math.log(M[(w, c)] / (prob_sim_word * prob_context_word), 2))
 
 
 def get_similarity(w1, w2, row_dic, M):
@@ -243,7 +255,7 @@ def compare_simlex_words(sim_path, out_path, words_dic, M):
     """
     with open(sim_path, 'r') as gold_std_f:
         with open(out_path, 'w+') as sim_comp:
-            line = gold_std_f.readline()
+            line = None
             while (line != ""):
                 line = gold_std_f.readline()
                 pair_match = GOLD_STD_PAIR_PATT.match(line)
@@ -259,6 +271,39 @@ def compare_simlex_words(sim_path, out_path, words_dic, M):
                 sim_comp.write("%s\t%s\t%s\t%s\n" % (word1, word2, pair_match.group(3), sim_val))
 
 
+def get_simliarty_list(path, POS=None):
+    simList = []
+    file = open(path, "r")
+    for line in file.readlines():
+        sim = float(line.split()[3])
+        posf = line.split()[2]
+        if POS is not None:
+            if POS == posf:
+                simList.append(sim)
+        else:
+            simList.append(sim)
+    file.close()
+    return simList
+
+
+def calc_correlation(simlex_path, myfile_path, output):
+    POS = [None, ADJ, NOUN, VERB]
+    for p in POS:
+        simlex_sim = get_simliarty_list(simlex_path, p)
+        my_sim = get_simliarty_list(myfile_path, p)
+        # Full dataset
+        if p is None:
+            print ("Entire dataset")
+            assert(len(simlex_sim) == len(my_sim))
+            correlation = st.spearmanr(simlex_sim, my_sim)
+            output.write("Full correlation " + str(correlation) + "\n")
+        # Dataset by specific POS
+        else:
+            print("POS: " + p)
+            correlation = st.spearmanr(simlex_sim, my_sim)
+            output.write(p + " correlation " + str(correlation) + "\n")
+
+
 def main():
     # parse command line options
     checkpoint = 0
@@ -267,6 +312,7 @@ def main():
             checkpoint = int(sys.argv[1])
         except:
             print(USAGE_MESSAGE)
+            return
 
     if checkpoint != 0:
         with open(ROWS_INDICES_FILE, 'r') as rows_file:
@@ -275,6 +321,7 @@ def main():
             col_dic = json.load(cols_file)
 
     else:
+        print("Stage: Preprocessing")
         row_dic, col_dic = init()
         with open(ROWS_INDICES_FILE, 'w+') as rows_file:
             json.dump(row_dic, rows_file)
@@ -282,78 +329,97 @@ def main():
             json.dump(col_dic, cols_file)
 
     if checkpoint <= 1:
+        print("Stage: Frequency Matrices Building")
         print("creating frequency matrix with context windows of 2")
         M = create_freq_matrix(row_dic, col_dic, 2, CLEAN_CORPUS)
+        print("recording...")
         mmwrite(FREQ_MATRIX_2, M)
-
         M.clear()
+        print()
 
-        print("creating frequency matrix with context windows of 2")
+        print("creating frequency matrix with context windows of 5")
         M = create_freq_matrix(row_dic, col_dic, 5, CLEAN_CORPUS)
-        mmwrite(FREQ_MATRIX_2, M)
-
+        print("recording...")
+        mmwrite(FREQ_MATRIX_5, M)
         M.clear()
+        print()
 
     if checkpoint <= 2:
+        print("Stage: PPMI Calculation")
         print("load matrix: context windows of length 5")
         M = mmread(FREQ_MATRIX_5).todense()
-        print("matrix loaded\n")
-
+        print("matrix loaded")
         print("calculating smoothed probabilities")
         calculate_smoothed_probabilies(row_dic, col_dic, M, SMOOTH_FACTOR)
         print("calculate PPMI")
         calculate_ppmi(row_dic, col_dic, M)
         print("recording...")
         mmwrite(PPMI_MATRIX_5, M)
-
-        M.clear()
+        M = None
 
         print("\nloading matrix: context windows of length 2")
         M = mmread(FREQ_MATRIX_2).todense()
-        print("matrix loaded\n")
-
+        print("matrix loaded")
         print("calculating smoothed probabilities")
         calculate_smoothed_probabilies(row_dic, col_dic, M, SMOOTH_FACTOR)
         print("calculate PPMI")
         calculate_ppmi(row_dic, col_dic, M)
         print("recording...")
         mmwrite(PPMI_MATRIX_2, M)
-
-        M.clear()
+        M = None
+        print()
 
     if checkpoint <= 3:
-        print("Compare Stage\n")
+        print("Stage: Similarity Calculation\n")
         print("load matrix: context windows of length 5")
         M = mmread(FREQ_MATRIX_5).todense()
-        print("matrix loaded\n")
+        print("matrix loaded")
         print("compare...")
         compare_simlex_words(GOLD_STANDARD_SIMLEX, COMP_FREQ_5, row_dic, M)
         print("finished")
-        M.clear()
+        M = None
 
-        print("load matrix: context windows of length 2")
+        print("\nload matrix: context windows of length 2")
         M = mmread(FREQ_MATRIX_2).todense()
-        print("matrix loaded\n")
+        print("matrix loaded")
         print("compare...")
         compare_simlex_words(GOLD_STANDARD_SIMLEX, COMP_FREQ_2, row_dic, M)
         print("finished")
-        M.clear()
+        M = None
 
-        print("load matrix: context windows of length 5")
-        M = mmread(PPMI_MATRIX_5).todense()
-        print("matrix loaded\n")
+        print("\nload PPMI matrix: context windows of length 5")
+        M = mmread(PPMI_MATRIX_5)
+        print("matrix loaded")
         print("compare...")
         compare_simlex_words(GOLD_STANDARD_SIMLEX, COMP_PPMI_5, row_dic, M)
         print("finished")
-        M.clear()
+        M = None
 
-        print("load matrix: context windows of length 2")
-        M = mmread(PPMI_MATRIX_2).todense()
-        print("matrix loaded\n")
+        print("\nload PPMI matrix: context windows of length 2")
+        M = mmread(PPMI_MATRIX_2)
+        print("matrix loaded")
         print("compare...")
         compare_simlex_words(GOLD_STANDARD_SIMLEX, COMP_PPMI_2, row_dic, M)
         print("finished")
-        M.clear()
+        M = None
+        print()
+
+    print("Stage: Correlation Check\n")
+    output = open(CORRELATION_PATH, "w")
+    print ("frequency 2 window")
+    output.write("frequency 2 window\n")
+    calc_correlation(GOLD_STANDARD_SIMLEX, COMP_FREQ_2,output)
+    print ("frequency 5 window")
+    output.write("frequency 5 window\n")
+    calc_correlation(GOLD_STANDARD_SIMLEX, COMP_FREQ_5,output)
+    print ("ppmi 2 window")
+    output.write("ppmi 2 window\n")
+    calc_correlation(GOLD_STANDARD_SIMLEX, COMP_PPMI_2,output)
+    print ("ppmi 5 window")
+    output.write("ppmi 5 window\n")
+    calc_correlation(GOLD_STANDARD_SIMLEX, COMP_PPMI_5,output)
+    print ("finished")
+    output.close()
 
 
 def test():

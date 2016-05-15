@@ -1,4 +1,3 @@
-word1	word2	POS	SimLex999
 old	new	A	1.58
 smart	intelligent	A	9.2
 hard	difficult	A	8.77
