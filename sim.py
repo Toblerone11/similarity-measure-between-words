@@ -1,3 +1,19 @@
+"""
+notes:
+-	co-ocurrence of simlex word with itself
+	is counted only when there is at least two
+	of this word at the same context window.
+
+-	if in the same ngram specific word occurre
+	more than once, then count only once.
+
+-	distance method: cosine similarity.
+
+- 	ignore punctuation + strip words from punctuation if there is any.
+
+- 	if in the same ngram specific word occurre more than once, count only once.
+"""
+
 import json
 import sys, numpy, re, os, math
 import scipy.stats as st
@@ -26,15 +42,7 @@ ADJ = "A"
 NOUN = "N"
 VERB = "V"
 
-USAGE_MESSAGE = "Usage: <integer>\n\nThe process is divided into 5 parts:\nPreprocessing --> Frequency Matrices Building --> PPMI Calculation --> Similarity Calculation --> Correlation Check\n" \
-                "The process is pretty long and each option is using as checkpoint for some stage.\n" \
-                "After each stage all relevant data is saved into files and the procedure may continue from the last stage that has been invoked.\n" \
-                "options:\n" \
-                "\t'0' or lower - start point: Preprocessing\n" \
-                "\t'1' - start point: Frequency Matrices Building\n" \
-                "\t'2' - start point: PPMI Calculation\n" \
-                "\t'3' - start point: Similarity Calculation\n" \
-                "\t'4 or greater' - start point: Correlation Check\n"
+USAGE_MESSAGE = "Usage:"
 
 DIGIT_REPR = "<!DIGIT!>"
 BEGIN_S = re.compile("\s*<s>\s*")
@@ -102,9 +110,14 @@ def preprocess(path_to_corpus, relevance_treshold=None):
                 elif END_D.match(line):
                     continue
                 else:
+                    if line == "\n":
+                        continue
                     clean_word = STRIP.sub("", line).lower()
                     if DIGIT.match(clean_word):
                         clean_word = DIGIT_REPR
+                    elif (clean_word == ""): 	# punctuation mark was here.
+                        continue				# ignore punc. marks
+                        # clean_word = line[:-1]	#include punc. marks
 
                     add = " " if len(sentence) > 0 else ""
                     sentence += add + clean_word
@@ -112,11 +125,22 @@ def preprocess(path_to_corpus, relevance_treshold=None):
                     # add word to frequency count
                     words_count[clean_word] += 1
 
+	# recording words frequencies into file.
+    with open("words_frequencies", 'w+') as fwf:
+        for w, f in words_count.most_common():
+            fwf.write("{0} : {1}\n".format(w,f))
+
+	# returning diminished counter with the most common words.
     if relevance_treshold is not None:
         return Counter(dict(words_count.most_common(relevance_treshold)))
 
     return words_count
 
+def print_title(title):
+    """
+	function which used only for logging (to file or to the screen)
+	"""
+    print("\n{0}\n{1}\n".format(title, "="*(len(title) + 2)))
 
 def get_simlex(path_to_simlex):
     """
@@ -137,12 +161,10 @@ def get_simlex(path_to_simlex):
 
 
 def create_freq_matrix(row_dic, col_dic, k, corpus_fn):
-    # TODO Add Loop over the corpus
-
     M = ss.dok_matrix((len(row_dic), len(col_dic)))
     corpus_f = open(corpus_fn)
     for sent in corpus_f:
-        sent = k * ". " + sent + k * " ."
+        sent = k * ". " + sent[:-1] + k * " ."
         add_to_matrix_gram(sent, row_dic, col_dic, M, k)
 
     return M
@@ -160,16 +182,22 @@ def add_to_matrix_gram(sent, row_dic, col_dic, M, k):
     n = 2 * k + 1
     middle = k
     grams = ngrams(sent, n)
-    # print grams
-    # grams = []
+    already_occurred = set()	# keep track of already seen words in the same context window
     for gr in grams:
         row_word = gr[middle]
-        for word in gr:
-            if row_word in row_dic and word in col_dic:
-                coordinates = (row_dic.get(row_word), col_dic.get(word))
-                M[coordinates] += 1
-                # print M[coordinates]
+        if row_word not in row_dic:
+            continue
+        already_occurred.clear()
+        row_index = row_dic.get(row_word)
+        for word in gr[:middle] + gr[middle+1:]:
+            if (word in already_occurred) or (word not in col_dic):
+                continue
 
+            already_occurred.add(word)
+            col_index = col_dic.get(word)
+            coordinates = (row_index, col_index)
+            M[coordinates] += 1
+			
 
 def calculate_probabilies(row_dic, col_dic, M):
     """
@@ -239,7 +267,7 @@ def get_similarity(w1, w2, row_dic, M):
     vec1 = M[row_dic[w1]]
     vec2 = M[row_dic[w2]]
 
-    return cosine(vec1, vec2)
+    return 1 - cosine(vec1, vec2)
 
 
 # evaluation		 +
@@ -272,6 +300,12 @@ def compare_simlex_words(sim_path, out_path, words_dic, M):
 
 
 def get_simliarty_list(path, POS=None):
+    """
+	loads the scores of the compared words and return it as list of tuples.
+	:param: path - the path to the compared words file.
+	:param: POS - extracting only words which corresponds to this part of speech, if specified.
+	:return: list of tuples [ (word1, word2, POS, similarity_score)]
+	"""
     simList = []
     file = open(path, "r")
     for line in file.readlines():
@@ -287,6 +321,9 @@ def get_simliarty_list(path, POS=None):
 
 
 def calc_correlation(simlex_path, myfile_path, output):
+    """
+	follows spearman correlation between the gold standard and our scores.
+	"""
     POS = [None, ADJ, NOUN, VERB]
     for p in POS:
         simlex_sim = get_simliarty_list(simlex_path, p)
@@ -294,7 +331,6 @@ def calc_correlation(simlex_path, myfile_path, output):
         # Full dataset
         if p is None:
             print ("Entire dataset")
-            assert(len(simlex_sim) == len(my_sim))
             correlation = st.spearmanr(simlex_sim, my_sim)
             output.write("Full correlation " + str(correlation) + "\n")
         # Dataset by specific POS
@@ -312,16 +348,15 @@ def main():
             checkpoint = int(sys.argv[1])
         except:
             print(USAGE_MESSAGE)
-            return
 
     if checkpoint != 0:
+        print_title("Preprocessing Stage")
         with open(ROWS_INDICES_FILE, 'r') as rows_file:
             row_dic = json.load(rows_file)
         with open(COLS_INDICES_FILE, 'r') as cols_file:
             col_dic = json.load(cols_file)
 
     else:
-        print("Stage: Preprocessing")
         row_dic, col_dic = init()
         with open(ROWS_INDICES_FILE, 'w+') as rows_file:
             json.dump(row_dic, rows_file)
@@ -329,23 +364,19 @@ def main():
             json.dump(col_dic, cols_file)
 
     if checkpoint <= 1:
-        print("Stage: Frequency Matrices Building")
+        print_title("Creating Frequency Matrix Stage")
         print("creating frequency matrix with context windows of 2")
         M = create_freq_matrix(row_dic, col_dic, 2, CLEAN_CORPUS)
-        print("recording...")
         mmwrite(FREQ_MATRIX_2, M)
         M.clear()
-        print()
 
         print("creating frequency matrix with context windows of 5")
         M = create_freq_matrix(row_dic, col_dic, 5, CLEAN_CORPUS)
-        print("recording...")
         mmwrite(FREQ_MATRIX_5, M)
         M.clear()
-        print()
 
     if checkpoint <= 2:
-        print("Stage: PPMI Calculation")
+        print_title("PPMI Stage")
         print("load matrix: context windows of length 5")
         M = mmread(FREQ_MATRIX_5).todense()
         print("matrix loaded")
@@ -367,11 +398,10 @@ def main():
         print("recording...")
         mmwrite(PPMI_MATRIX_2, M)
         M = None
-        print()
 
     if checkpoint <= 3:
-        print("Stage: Similarity Calculation\n")
-        print("load matrix: context windows of length 5")
+        print_title("Compare Stage")
+        print("load matrix: frequency - context windows of length 5")
         M = mmread(FREQ_MATRIX_5).todense()
         print("matrix loaded")
         print("compare...")
@@ -379,7 +409,7 @@ def main():
         print("finished")
         M = None
 
-        print("\nload matrix: context windows of length 2")
+        print("load matrix: frequency - context windows of length 2")
         M = mmread(FREQ_MATRIX_2).todense()
         print("matrix loaded")
         print("compare...")
@@ -387,7 +417,7 @@ def main():
         print("finished")
         M = None
 
-        print("\nload PPMI matrix: context windows of length 5")
+        print("load matrix: ppmi - context windows of length 5")
         M = mmread(PPMI_MATRIX_5)
         print("matrix loaded")
         print("compare...")
@@ -395,16 +425,16 @@ def main():
         print("finished")
         M = None
 
-        print("\nload PPMI matrix: context windows of length 2")
+        print("load matrix: ppmi - context windows of length 2")
         M = mmread(PPMI_MATRIX_2)
         print("matrix loaded")
         print("compare...")
         compare_simlex_words(GOLD_STANDARD_SIMLEX, COMP_PPMI_2, row_dic, M)
         print("finished")
         M = None
-        print()
 
-    print("Stage: Correlation Check\n")
+
+    print_title("Calculate Correlation Stage")
     output = open(CORRELATION_PATH, "w")
     print ("frequency 2 window")
     output.write("frequency 2 window\n")
@@ -460,7 +490,6 @@ def test():
     print(testM)
 
 
-# test()
-
 if __name__ == "__main__":
+    # test()
     main()
